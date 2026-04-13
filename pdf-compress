@@ -1,153 +1,144 @@
 #!/usr/bin/env python3
+#
+# pdf-compress - ghostrscipt wrapper for PDF compression
+# 2026-04 Boruch-Baum
+#
+# Adapted from: https://github.com/hkdb/cpdf    <hkdb@3df.io>
 
-###############################################################
-### PROJECT:
-### cpdf - The PDF Compressor
-### SCRIPT:
-### cpdf
-### VERSION:
-### v2.0
-### DESCRIPTION:
-### A script to make compressing pdf files more easily by
-### automating gs commands
-### LOCATION:
-### This should be placed in a bin dir of your choice
-### MAINTAINED BY:
-### hkdb <hkdb@3df.io>
-### ############################################################
+import shutil          # for which
+from sys import version_info, argv, exit
+from os  import path   # for basename, isfile, getsize
+from re  import search # for search, search.group
+from subprocess import Popen, PIPE, STDOUT
 
-import os, datetime, sys, glob, re, subprocess, time
+VERSION = "v2026.04.14"
 
-VERSION = "v2.0"
+MIN_PYTHON = (3, 10)
+# Calculated using 'vermin'
+# * v3.10 :: match
+# * v3.8  :: named expressions (walrus operator)
+# * v3.6  :: f-strings
 
-# Argument Handling
-if len(sys.argv) <= 1:
-    print("\n" + '\033[1;37m' + "ERROR:" + '\033[0m' + "  This script only takes 3 specific arguments. Use the \"help\" argument to learn more.\n")
-elif str(sys.argv[1]) == "help":
-    print("\nThis is a script to compress a pdf file with the convention of:\n\n" + '\033[1;37m' + "cpdf [type: screen, ebook, printer, prepress, or default] [input file name] [output file name]" + '\033[0m' + "\n\nTo learn more about the different types, use the \"types\" flag (ie. cpdf types)\n")
-    sys.exit()
-elif str(sys.argv[1]) == "types":
-    print("\n")
-    print('\033[1;37m' + "screen" + '\033[0m' + " - selects low-resolution output similar to the Acrobat Distiller \"Screen Optimized\" setting.")
-    print('\033[1;37m' + "ebook" + '\033[0m' + " - selects medium-resolution output similar to the Acrobat Distiller \"eBook\" setting.")
-    print('\033[1;37m' + "printer" + '\033[0m' + " - selects output similar to the Acrobat Distiller \"print(Optimized\" setting.")
-    print('\033[1;37m' + "prepress" + '\033[0m' + " - selects output similar to Acrobat Distiller \"Prepress Optimized\" setting.")
-    print('\033[1;37m' + "default" + '\033[0m' + " - selects output intended to be useful across a wide variety of uses, possibly at the expense of a larger output file.")
-    print("\n")
-    sys.exit()
-elif str(sys.argv[1]) == "version":
-    print('\033[1;37m' + "\ncPDF " + VERSION + "\n" + '\033[0m')
-    sys.exit()
-elif len(sys.argv) != 4:
-    print("\n" + '\033[91m' + "ERROR:" + '\033[0m' + " This script only takes 3 specific arguments. Use the \"help\" argument to learn more.\n")
-    sys.exit()
-elif str(sys.argv[1]) != "help" and str(sys.argv[1]) != "screen" and str(sys.argv[1]) != "ebook" and str(sys.argv[1]) != "printer" and str(sys.argv[1]) != "prepress" and str(sys.argv[1]) != "default":
-    print("\n" + '\033[91m' + "ERROR:" + '\033[0m' + " Incorrect compression type. Please use the \"help\" argument to learn more.\n")
-    sys.exit()
-elif not str(sys.argv[2]).endswith(".pdf"):
-    print("\n" + '\033[91m' + "ERROR:" + '\033[0m' + " The specified input file needs to be a pdf file. However, your file does not end with a \".pdf\" extension\n")
-elif str(sys.argv[2]) == str(sys.argv[3]):
-    print("\n" + '\033[91m' + "ERROR:" + '\033[0m' + " The input file name must not be the same as the output file name. Please use the \"help\" argument to learn more.\n")
-    sys.exit()
-elif str(sys.argv[1]) != "help" and str(sys.argv[2]) == None or str(sys.argv[3]) == None:
-    print("\n" + '\033[91m' + "ERROR:" + '\033[0m' + " Incorrect arguments. Please use the \"help\" argument to learn more.\n")
-    sys.exit()
-else:
-    cType = str(sys.argv[1]) # Compression Type
-    inFile = str(sys.argv[2]) # Input File Name
-    outFile = str(sys.argv[3]) # Output File Name
-    
-    # Check to make sure input file exists
-    exist = os.path.isfile(inFile)
-    if exist == False:
-        print("\n" + '\033[91m' + "ERROR:" + '\033[0m' + " " + inFile + " does not exist... Exiting...\n")
-        sys.exit()
+def help_msg():
+  print( f"Usage: {path.basename( __file__ )} type input-file output-file" )
+  print( """
+Compress a pdf file, using ghostscript\n
+types:\033[1;37m \tscreen \033[0m   - lowest-resolution
+\033[1;37m \tebook    \033[0m - medium-resolution
+\033[1;37m \tprinter  \033[0m - print optimized
+\033[1;37m \tprepress \033[0m - prepress optimized
+\033[1;37m \tdefault  \033[0m - least compressed
+""")
 
-    # Check to make sure that the input file name is safe
-    if re.search('[|;`><{}#*]', inFile):
-        print("\n" + '\033[91m' + "ERROR:" + '\033[0m' + " Input file contains invalid characters such as | ; ` > < } { # *.... Exiting...\n")
-        sys.exit()
 
-    # Check to make sure that the output file name is safe
-    if re.search('[|;`><{}#*]', outFile):
-        print("\n" + '\033[91m' + "ERROR:" + '\033[0m' + " Output file contains invalid characters such as | ; ` > < } { # *.... Exiting...\n")
-        sys.exit()
+def err_print(msg):
+  print(f'{path.basename( __file__ )}: \033[91mERROR: \033[0m {msg}')
 
-    # Check to make sure the user really wants to overwrite the existing file with the new output file and that the output file does in fact end with .pdf
-    if os.path.isfile(outFile):
-        if not outFile.endswith(".pdf"):
-            ask = "\n" + '\033[1;36m' + "WARNING:" + '\033[0m' + " \"" + outFile + "\" does not end with \".pdf\". Are you sure you want to continue? (y/n) "
-            confirm = input(ask)
-            if confirm == "No" or confirm == "no" or confirm == "N" or confirm == "n":
-                sys.exit()
-            elif confirm == "Yes" or confirm == "yes" or confirm == "Y" or confirm == "y":
-                ask = "\n" + '\033[1;36m' + "WARNING:" + '\033[0m' + " \"" + outFile + "\" already exists. Are you sure you want to overwrite it? (y/n) "
-                confirm = input(ask)
-                if confirm == "No" or confirm == "no" or confirm == "N" or confirm == "n":
-                    sys.exit()
-                elif confirm == "Yes" or confirm == "yes" or confirm == "Y" or confirm == "y":
-                    print("\n")
-                else:
-                    print("I don't understand your input. Exiting...")
-                    sys.exit()
-            else:
-                print("I don't understand your input. Exiting...\n")
-                sys.exit()
-        else:
-            ask = "\n" + '\033[1;36m' + "WARNING:" + '\033[0m' + " \"" + outFile + "\" already exists. Are you sure you want to overwrite it? (y/n) "
-            confirm = input(ask)
-            if confirm == "No" or confirm == "no" or confirm == "N" or confirm == "n":
-                print("\nGood catch huhn? Exiting...\n")
-                sys.exit()
-            elif confirm == "Yes" or confirm == "yes" or confirm == "Y" or confirm == "y":
-                pass
-            else:
-                print("I don't understand your input. Exiting...\n")
-                sys.exit()
+
+def warn_print(msg):
+  return f'\033[1;36mWARNING: \033[0m {msg}'
+
+
+def yes_no(prompt):
+  while True:
+    answer = input( f'{prompt} (y/n): ' ).strip().lower()
+    if answer in ("y", "yes"):
+      return True
+    if answer in ("n", "no"):
+      return False
+    print("Please enter yes or no.")
+
+
+def arg_parse():
+  match len(argv)-1:
+    case 1:
+      if str(argv[1]) == "version":
+        print( f'{path.basename( __file__ )} {VERSION}')
+      else:
+        help_msg()
+      exit()
+    case 3:
+      pass
+    case _:
+      help_msg()
+      exit()
+  if str(argv[1]) not in ("screen", "ebook", "printer", "prepress", "default"):
+    err_print(f"Incorrect compression type: {argv[1]}")
+    help_msg()
+    exit()
+  if not str(argv[2]).endswith(".pdf"):
+    err_print("Input filename does not end with a \".pdf\" extension.")
+    exit()
+  elif str(argv[2]) == str(argv[3]):
+    err_print("Input and output filenames are identical.")
+    exit()
+
+
+def invalid_chars(searchText, printText):
+  if found := search('[|;`><{}#*]', searchText):
+    err_print( f'{printText} contains invalid character {found.group()}"' )
+    exit()
+
+
+def sanity_checks(inFile, outFile):
+  exist = path.isfile(inFile)
+  if exist == False:
+    err_print( f'{inFile} does not exist.')
+    exit()
+  invalid_chars(inFile,  "Input filename")
+  invalid_chars(outFile, "Output filename")
+  if path.isfile(outFile):
+    if not yes_no( warn_print( f'Output file "{outFile}" exists. Overwrite?') ):
+      exit()
+  if not outFile.endswith(".pdf"):
+    if not yes_no( warn_print( f'Output file "{outFile}" ' +
+                               f'does not end with ".pdf". Continue?') ):
+      exit()
+
+
+def main():
+  if version_info < MIN_PYTHON:
+    print("Requires Python version >= " + str(MIN_PYTHON[0]) + "." + str(MIN_PYTHON[1]) )
+    exit()
+  if not shutil.which("gs"):
+    err_print( "Ghostscript not installed." )
+    exit()
+  arg_parse()
+  cType   = str(argv[1]) # Compression Type
+  inFile  = str(argv[2]) # Input File Name
+  outFile = str(argv[3]) # Output File Name
+  sanity_checks(inFile, outFile)
+  cmmd = [
+      'gs',
+      '-sDEVICE=pdfwrite',
+      '-dCompatibilityLevel=1.6',
+      f'-dPDFSETTINGS=/{cType}',
+      '-dNOPAUSE',
+      '-dQUIET',
+      '-dBATCH',
+      f'-sOutputFile={outFile}',
+      inFile
+  ]
+  # Run Ghostscript Command
+  process = Popen(cmmd, stdout=PIPE, stderr=STDOUT)
+  # Progress & Details
+  initial_size = path.getsize(inFile)
+  status = 0
+  n = int(initial_size)
+  for i in range(n):
+    if process.poll() == None:
+      if status % 100 == 0:
+        print(f"Working... {status}", end="\r", flush=True)
+      status += 1
     else:
-        if not outFile.endswith(".pdf"):
-            ask = "\n\"" + outFile + "\" does not end with \".pdf\". Are you sure you want to continue? (y/n) "
-            confirm = input(ask)
-            if confirm == "No" or confirm == "no" or confirm == "N" or confirm == "n":
-                print("\nGood catch huhn? Exiting...\n")
-                sys.exit()
-            elif confirm == "Yes" or confirm == "yes" or confirm == "Y" or confirm == "y":
-                pass
-            else:
-                print("I don't understand your input. Exiting...")
-                sys.exit()
+      break
+  process.wait(timeout=2)
+  print("\nCompressed!")
+  final_size = path.getsize(outFile)
+  inSize = str(initial_size / 1000000)
+  print(f"Input file:   {initial_size / 1000000:.2f}Mb  {inFile}")
+  print(f"Output file:  {final_size / 1000000:.2f}Mb  {outFile}")
 
-    # Build gs command as list (safer - no shell injection possible)
-    cmmd = [
-        'gs',
-        '-sDEVICE=pdfwrite',
-        '-dCompatibilityLevel=1.6',
-        f'-dPDFSETTINGS=/{cType}',
-        '-dNOPAUSE',
-        '-dQUIET',
-        '-dBATCH',
-        f'-sOutputFile={outFile}',
-        inFile
-    ]
 
-    # Run Ghostscript Command
-    process = subprocess.Popen(cmmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-
-    # Progress & Details
-    print("\n")
-    initial_size = os.path.getsize(inFile)
-    status = 0
-    n = int(initial_size*10)
-    # poll = process.poll()
-    for i in range(n):
-        if process.poll() == None:
-            status = status + 1
-        else:
-            print(process.poll())
-            break
-    process.wait()
-    print("\nCompressed!\n")
-    final_size = os.path.getsize(outFile)
-    inSize = str(initial_size / 1000000)
-    print(inFile + " is " + inSize + "MB in size.")
-    print(outFile + " is {0:.1f}MB after compression.\n".format(final_size / 1000000))
+if __name__ == "__main__":
+    main()
